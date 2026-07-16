@@ -603,13 +603,18 @@ def trust_list_to_registry_unsafe(
             return registry, e.value
 
 
-def _verify_xml(tl_xml: str, tlso_cert: x509.Certificate):
+def _verify_xml(
+    tl_xml: str,
+    tlso_cert: x509.Certificate,
+    validation_time: Optional[datetime],
+):
     tl_xml_bytes = tl_xml.encode('utf8')
     verifier = XAdESVerifier()
     cert_obj = load_der_x509_certificate(tlso_cert.dump())
     config = XAdESSignatureConfiguration(
         require_x509=True,
         expect_references=True,
+        verification_time=validation_time,
     )
     try:
         verify_results = verifier.verify(
@@ -619,16 +624,18 @@ def _verify_xml(tl_xml: str, tlso_cert: x509.Certificate):
         )
     except InvalidXmlSignature as e:
         raise SignatureValidationError(
-            f"Invalid XML signature on trusted list: {e}",
+            f"Invalid XML signature on trusted list: [{type(e).__name__}] {e}",
             ades_subindication=AdESIndeterminate.GENERIC,
         ) from e
     return verify_results
 
 
 def _validate_and_extract_tl_data(
-    tl_xml: str, tlso_cert: x509.Certificate
+    tl_xml: str,
+    tlso_cert: x509.Certificate,
+    validation_time: Optional[datetime],
 ) -> str:
-    verify_results = _verify_xml(tl_xml, tlso_cert)
+    verify_results = _verify_xml(tl_xml, tlso_cert, validation_time)
     tl_signed_xml = None
     for result in verify_results:
         if result.signed_xml is None:
@@ -653,7 +660,9 @@ def _validate_and_extract_tl_data(
 
 
 def _validate_and_extract_tl_data_multiple_certs(
-    tl_xml: str, tlso_cert_candidates: List[x509.Certificate]
+    tl_xml: str,
+    tlso_cert_candidates: List[x509.Certificate],
+    validation_time: Optional[datetime],
 ) -> str:
     # sort the issuer certs by newest first
     sorted_candidates = sorted(
@@ -663,14 +672,19 @@ def _validate_and_extract_tl_data_multiple_certs(
     result = None
     for candidate in sorted_candidates:
         try:
-            result = _validate_and_extract_tl_data(tl_xml, candidate)
+            result = _validate_and_extract_tl_data(
+                tl_xml, candidate, validation_time
+            )
             break
         except SignatureValidationError as e:
-            errors.append(e)
+            errors.append(
+                f"<{candidate.serial_number}|{candidate.subject.human_friendly}> {e.failure_message}"
+            )
     if not result:
+        sep = '\n - '
         msg = (
             f"None of the candidate TLSO certs could be used to validate "
-            f"the TL signature: {','.join(e.failure_message for e in errors)}"
+            f"the TL signature:{sep}{sep.join(errors)}"
         )
         raise SignatureValidationError(
             msg,
@@ -704,7 +718,7 @@ def trust_list_to_registry(
     :return:
     """
     tl_signed_xml = _validate_and_extract_tl_data_multiple_certs(
-        tl_xml, tlso_certs
+        tl_xml, tlso_certs, validation_time=None
     )
     return trust_list_to_registry_unsafe(tl_signed_xml, registry)
 
@@ -760,6 +774,10 @@ class LOTLParseResult:
     references: List[TLReference]
     errors: List[TSPServiceParsingError]
     pivot_urls: List[str]
+    claimed_date_issued: datetime
+
+
+KNOWN_OJEU_REANCHOR_URLS = ('https://eur-lex.europa.eu/eli/C/2026/1944/oj',)
 
 
 def parse_lotl_unsafe(
@@ -787,6 +805,9 @@ def parse_lotl_unsafe(
     )
     info_uris = _required(
         scheme_info.scheme_information_uri, "scheme information URIs"
+    )
+    issuance_dt = _required(
+        scheme_info.list_issue_date_time, "LotL issuance date"
     )
 
     references = []
@@ -821,13 +842,22 @@ def parse_lotl_unsafe(
             location, territory, tl_issuer_certs, frozenset(rules)
         )
         references.append(ref)
-    pivots = [
-        info_uri.value
-        for info_uri in info_uris.uri
-        if info_uri.value.endswith(".xml")
-    ]
+
+    def _pivots():
+        for info_uri in info_uris.uri:
+            if info_uri.value.endswith(".xml"):
+                yield info_uri.value
+            elif info_uri.value in KNOWN_OJEU_REANCHOR_URLS:
+                # Reanchoring point by legislative fiat.
+                # Pivots older than this point don't apply
+                break
+
+    pivots = list(_pivots())
     return LOTLParseResult(
-        references=references, errors=errors, pivot_urls=pivots
+        references=references,
+        errors=errors,
+        pivot_urls=pivots,
+        claimed_date_issued=issuance_dt.to_datetime(),
     )
 
 
@@ -845,20 +875,22 @@ def latest_known_lotl_tlso_certs() -> List[x509.Certificate]:
     return _lotl_certs_file("latest.cert.pem")
 
 
-def ojeu_bootstrap_lotl_tlso_certs() -> List[x509.Certificate]:
+def ojeu_bootstrap_lotl_tlso_certs(anchor=1) -> List[x509.Certificate]:
     """
     Retrieve the list of certificates published
     in `OJ C 276, 16.8.2019 <https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=uriserv:OJ.C_.2019.276.01.0001.01.ENG>`_,
     which is bundled with this library.
     """
-    return _lotl_certs_file("bootstrap.cert.pem")
+    return _lotl_certs_file(f"bootstrap-{anchor}.cert.pem")
 
 
 # TODO check validity time windows
 
 
 def validate_and_parse_lotl(
-    lotl_xml: str, lotl_tlso_certs: Optional[List[x509.Certificate]] = None
+    lotl_xml: str,
+    lotl_tlso_certs: Optional[List[x509.Certificate]] = None,
+    validation_time: Optional[datetime] = None,
 ) -> LOTLParseResult:
     """
     Validate and parse a list-of-the-lists (LOTL).
@@ -872,6 +904,8 @@ def validate_and_parse_lotl(
         library.
 
         See :func:`validate_and_parse_lotl`.
+    :param validation_time:
+        Reference time at which to validate the LotL, if not the current time.
     :return:
         A parse result.
     """
@@ -879,6 +913,6 @@ def validate_and_parse_lotl(
     if not lotl_tlso_certs:
         lotl_tlso_certs = latest_known_lotl_tlso_certs()
     lotl_xml_validated = _validate_and_extract_tl_data_multiple_certs(
-        lotl_xml, lotl_tlso_certs
+        lotl_xml, lotl_tlso_certs, validation_time=validation_time
     )
     return parse_lotl_unsafe(lotl_xml_validated)
