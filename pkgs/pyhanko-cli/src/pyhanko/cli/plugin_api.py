@@ -1,5 +1,6 @@
 import abc
-from typing import ClassVar, ContextManager, List, Optional
+from contextlib import AbstractContextManager
+from typing import ClassVar
 
 import click
 from pyhanko.cli._ctx import CLIContext
@@ -10,8 +11,8 @@ __all__ = [
     'SIGNING_PLUGIN_REGISTRY',
     'CLIContext',
     'SigningCommandPlugin',
-    'register_signing_plugin',
     'prompt_for_password',
+    'register_signing_plugin',
 ]
 
 
@@ -52,18 +53,18 @@ class SigningCommandPlugin(abc.ABC):
     A short description of the plugin for use in the ``--help`` output.
     """
 
-    unavailable_message: ClassVar[Optional[str]] = None
+    unavailable_message: ClassVar[str | None] = None
     """
     Message to display if the plugin is unavailable.
     """
 
-    def click_options(self) -> List[click.Option]:
+    def click_options(self) -> list[click.Option]:
         """
         The list of ``click`` options for your custom command.
         """
         raise NotImplementedError
 
-    def click_extra_arguments(self) -> List[click.Argument]:
+    def click_extra_arguments(self) -> list[click.Argument]:
         """
         The list of ``click`` arguments for your custom command.
         """
@@ -85,7 +86,7 @@ class SigningCommandPlugin(abc.ABC):
 
     def create_signer(
         self, context: CLIContext, **kwargs
-    ) -> ContextManager[Signer]:
+    ) -> AbstractContextManager[Signer]:
         """
         Instantiate a context manager that creates and potentially
         also implements a deallocator for a
@@ -104,7 +105,7 @@ class SigningCommandPlugin(abc.ABC):
         raise NotImplementedError
 
 
-SIGNING_PLUGIN_REGISTRY: List[SigningCommandPlugin] = []
+SIGNING_PLUGIN_REGISTRY: list[SigningCommandPlugin] = []
 SIGNING_PLUGIN_ENTRY_POINT_GROUP = 'pyhanko.cli_plugin.signing'
 
 

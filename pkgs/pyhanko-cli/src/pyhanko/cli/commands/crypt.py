@@ -42,18 +42,17 @@ def encrypt_file(infile, outfile, password, recipient):
     if recipient:
         recipient_certs = list(load_certs_from_pemder(cert_files=recipient))
 
-    with pyhanko_exception_manager():
-        with open(infile, 'rb') as inf:
-            r = PdfFileReader(inf)
-            w = copy_into_new_writer(r)
+    with pyhanko_exception_manager(), open(infile, 'rb') as inf:
+        r = PdfFileReader(inf)
+        w = copy_into_new_writer(r)
 
-            if recipient_certs:
-                w.encrypt_pubkey(recipient_certs)
-            else:
-                w.encrypt(owner_pass=password)
+        if recipient_certs:
+            w.encrypt_pubkey(recipient_certs)
+        else:
+            w.encrypt(owner_pass=password)
 
-            with open(outfile, 'wb') as outf:
-                w.write(outf)
+        with open(outfile, 'wb') as outf:
+            w.write(outf)
 
 
 @cli_root.group(
@@ -85,29 +84,28 @@ decrypt_force_flag = click.option(
 )
 @decrypt_force_flag
 def decrypt_with_password(infile, outfile, password, force):
-    with pyhanko_exception_manager():
-        with open(infile, 'rb') as inf:
-            r = PdfFileReader(inf)
-            if r.security_handler is None:
-                raise click.ClickException("File is not encrypted.")
-            elif not isinstance(r.security_handler, StandardSecurityHandler):
-                raise click.ClickException(
-                    "File is not encrypted with the standard (password-based) security handler"
-                )
-            if not password:
-                password = prompt_for_password(prompt='File password: ')
-            auth_result = r.decrypt(password)
-            if auth_result.status == crypt.AuthStatus.USER and not force:
-                raise click.ClickException(
-                    "Password specified was the user password, not "
-                    "the owner password. Pass --force to decrypt the "
-                    "file anyway."
-                )
-            elif auth_result.status == crypt.AuthStatus.FAILED:
-                raise click.ClickException("Password didn't match.")
-            w = copy_into_new_writer(r)
-            with open(outfile, 'wb') as outf:
-                w.write(outf)
+    with pyhanko_exception_manager(), open(infile, 'rb') as inf:
+        r = PdfFileReader(inf)
+        if r.security_handler is None:
+            raise click.ClickException("File is not encrypted.")
+        elif not isinstance(r.security_handler, StandardSecurityHandler):
+            raise click.ClickException(
+                "File is not encrypted with the standard (password-based) security handler"
+            )
+        if not password:
+            password = prompt_for_password(prompt='File password: ')
+        auth_result = r.decrypt(password)
+        if auth_result.status == crypt.AuthStatus.USER and not force:
+            raise click.ClickException(
+                "Password specified was the user password, not "
+                "the owner password. Pass --force to decrypt the "
+                "file anyway."
+            )
+        elif auth_result.status == crypt.AuthStatus.FAILED:
+            raise click.ClickException("Password didn't match.")
+        w = copy_into_new_writer(r)
+        with open(outfile, 'wb') as outf:
+            w.write(outf)
 
 
 @decrypt.command(help='decrypt using private key (PEM/DER)', name='pemder')
@@ -165,32 +163,31 @@ def decrypt_with_pemder(infile, outfile, key, cert, passfile, force, no_pass):
 def _decrypt_pubkey(
     sedk: crypt.SimpleEnvelopeKeyDecrypter, infile, outfile, force
 ):
-    with pyhanko_exception_manager():
-        with open(infile, 'rb') as inf:
-            r = PdfFileReader(inf)
-            if r.security_handler is None:
-                raise click.ClickException("File is not encrypted.")
-            if not isinstance(r.security_handler, crypt.PubKeySecurityHandler):
+    with pyhanko_exception_manager(), open(infile, 'rb') as inf:
+        r = PdfFileReader(inf)
+        if r.security_handler is None:
+            raise click.ClickException("File is not encrypted.")
+        if not isinstance(r.security_handler, crypt.PubKeySecurityHandler):
+            raise click.ClickException(
+                "File was not encrypted with a public-key security handler."
+            )
+        auth_result = r.decrypt_pubkey(sedk)
+        if auth_result.status == crypt.AuthStatus.FAILED:
+            raise click.ClickException("Failed to decrypt the file.")
+        else:
+            if (
+                not force
+                and auth_result.permission_flags
+                and PubKeyPermissions.ALLOW_ENCRYPTION_CHANGE
+                not in auth_result.permission_flags
+            ):
                 raise click.ClickException(
-                    "File was not encrypted with a public-key security handler."
+                    "Change of encryption is typically not allowed with "
+                    "user access. Pass --force to decrypt the file anyway."
                 )
-            auth_result = r.decrypt_pubkey(sedk)
-            if auth_result.status == crypt.AuthStatus.FAILED:
-                raise click.ClickException("Failed to decrypt the file.")
-            else:
-                if (
-                    not force
-                    and auth_result.permission_flags
-                    and PubKeyPermissions.ALLOW_ENCRYPTION_CHANGE
-                    not in auth_result.permission_flags
-                ):
-                    raise click.ClickException(
-                        "Change of encryption is typically not allowed with "
-                        "user access. Pass --force to decrypt the file anyway."
-                    )
-            w = copy_into_new_writer(r)
-            with open(outfile, 'wb') as outf:
-                w.write(outf)
+        w = copy_into_new_writer(r)
+        with open(outfile, 'wb') as outf:
+            w.write(outf)
 
 
 @decrypt.command(help='decrypt using private key (PKCS#12)', name='pkcs12')

@@ -1,5 +1,3 @@
-from typing import List, Optional
-
 import click
 from pyhanko.cli._root import cli_root
 from pyhanko.cli._trust import (
@@ -230,7 +228,7 @@ def addsig(
             key_usage = key_usage_sett.key_usage
     else:
         vc = None
-    field_name: Optional[str]
+    field_name: str | None
     if field:
         field_name, new_field_spec = parse_field_location_spec(
             field, require_full_spec=False
@@ -272,7 +270,7 @@ def _unavailable(signer_plugin: SigningCommandPlugin):
     return _unavailable_callback
 
 
-def register(plugins: List[SigningCommandPlugin]):
+def register(plugins: list[SigningCommandPlugin]):
     # we reset the command list before (re)populating it, in order to
     # make the tests more consistent
     addsig.commands = {}

@@ -1,5 +1,5 @@
 import contextlib
-from typing import ContextManager, List, Optional
+from contextlib import AbstractContextManager
 
 import click
 from pyhanko.cli._ctx import CLIContext
@@ -46,7 +46,7 @@ class PemderPlugin(SigningCommandPlugin):
     subcommand_name = 'pemder'
     help_summary = 'read key material from PEM/DER files'
 
-    def click_options(self) -> List[click.Option]:
+    def click_options(self) -> list[click.Option]:
         return [
             click.Option(
                 ('--key',),
@@ -96,7 +96,7 @@ class PemderPlugin(SigningCommandPlugin):
 
     def create_signer(
         self, context: CLIContext, **kwargs
-    ) -> ContextManager[Signer]:
+    ) -> AbstractContextManager[Signer]:
         @contextlib.contextmanager
         def _m():
             yield _pemder_signer(context, **kwargs)
@@ -164,10 +164,10 @@ class PKCS12Plugin(SigningCommandPlugin):
     subcommand_name = 'pkcs12'
     help_summary = 'read key material from PKCS#12 files'
 
-    def click_extra_arguments(self) -> List[click.Argument]:
+    def click_extra_arguments(self) -> list[click.Argument]:
         return [click.Argument(('pfx',), type=readable_file, required=False)]
 
-    def click_options(self) -> List[click.Option]:
+    def click_options(self) -> list[click.Option]:
         return [
             click.Option(
                 ('--p12-setup',),
@@ -203,7 +203,7 @@ class PKCS12Plugin(SigningCommandPlugin):
 
     def create_signer(
         self, context: CLIContext, **kwargs
-    ) -> ContextManager[Signer]:
+    ) -> AbstractContextManager[Signer]:
         @contextlib.contextmanager
         def _m():
             yield _pkcs12_signer(context, **kwargs)
@@ -216,7 +216,7 @@ def _pkcs12_signer(ctx: CLIContext, pfx, chain, passfile, p12_setup, no_pass):
     #  (now it fails with a gnarly DER decoding error, which is not very
     #  user-friendly)
     if p12_setup:
-        cli_config: Optional[CLIConfig] = ctx.config
+        cli_config: CLIConfig | None = ctx.config
         if cli_config is None:
             raise click.ClickException(
                 "The --p12-setup option requires a configuration file"

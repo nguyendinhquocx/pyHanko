@@ -45,7 +45,7 @@ from pyhanko_certvalidator.policy_decl import (
     FreshnessReqType,
 )
 
-__all__ = ['validate_signatures', 'ades_validate_signatures']
+__all__ = ['ades_validate_signatures', 'validate_signatures']
 
 
 def _assert_consistent_print_settings(pretty_print, executive_summary):
@@ -65,7 +65,7 @@ def _pretty_print_result(name, ix, status_str):
 
 
 def _print_summary_result(name, fingerprint, status_str):
-    click.echo('%s:%s:%s' % (name, fingerprint, status_str))
+    click.echo(f'{name}:{fingerprint}:{status_str}')
 
 
 def _signature_status(
@@ -363,11 +363,13 @@ def validate_signatures(
             if use_claimed_validation_time:
                 vc_kwargs['moment'] = embedded_sig.self_reported_timestamp
             (status_str, signature_ok) = _signature_status_str(
-                status_callback=lambda: _signature_status(
-                    vc_kwargs=vc_kwargs,
-                    key_usage_settings=key_usage_settings,
-                    embedded_sig=embedded_sig,
-                    skip_diff=no_diff_analysis,
+                status_callback=lambda embedded_sig=embedded_sig: (
+                    _signature_status(
+                        vc_kwargs=vc_kwargs,
+                        key_usage_settings=key_usage_settings,
+                        embedded_sig=embedded_sig,
+                        skip_diff=no_diff_analysis,
+                    )
                 ),
                 pretty_print=pretty_print,
                 executive_summary=executive_summary,
@@ -528,7 +530,7 @@ def ades_validate_signatures(
         for ix, embedded_sig in enumerate(r.embedded_regular_signatures):
             fingerprint: str = embedded_sig.signer_cert.sha256.hex()
             (status_str, signature_ok) = _signature_status_str(
-                status_callback=lambda: asyncio.run(
+                status_callback=lambda embedded_sig=embedded_sig: asyncio.run(
                     ades_lta_validation(
                         embedded_sig,
                         pdf_sig_policy,

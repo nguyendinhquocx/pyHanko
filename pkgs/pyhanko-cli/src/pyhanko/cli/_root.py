@@ -1,6 +1,6 @@
 import itertools
 import logging
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 import click
 import yaml
@@ -17,6 +17,7 @@ from pyhanko.version import __version__ as lib_version
 
 __all__ = ['cli_root']
 
+logger = logging.getLogger(__name__)
 
 full_version = f"{lib_version} (CLI {cli_version})"
 
@@ -55,7 +56,7 @@ def _root(ctx: click.Context, config, verbose, no_plugins):
             config = DEFAULT_CONFIG_FILE
         except FileNotFoundError:
             pass
-        except IOError as e:
+        except OSError as e:
             raise click.ClickException(
                 f"Failed to read {DEFAULT_CONFIG_FILE}: {e!s}"
             )
@@ -63,14 +64,14 @@ def _root(ctx: click.Context, config, verbose, no_plugins):
         try:
             with open(config, 'r') as f:
                 config_text = f.read()
-        except IOError as e:
+        except OSError as e:
             raise click.ClickException(
                 f"Failed to read configuration: {e!s}",
             )
 
     ctx.ensure_object(CLIContext)
     ctx_obj: CLIContext = ctx.obj
-    cfg: Optional[CLIRootConfig] = None
+    cfg: CLIRootConfig | None = None
     if config_text is not None:
         cfg = load_root_config(yaml.safe_load(config_text), no_plugins)
         ctx_obj.config = cfg.config
@@ -101,11 +102,11 @@ def _root(ctx: click.Context, config, verbose, no_plugins):
     logging_setup(log_config, verbose)
 
     if verbose:
-        logging.debug("Running with --verbose")
+        logger.debug("Running with --verbose")
     if config_text is not None:
-        logging.debug(f'Finished reading configuration from {config}.')
+        logger.debug(f'Finished reading configuration from {config}.')
     else:
-        logging.debug('There was no configuration to parse.')
+        logger.debug('There was no configuration to parse.')
 
 
 def load_root_config(config_dict, only_default_plugins=False) -> CLIRootConfig:
@@ -122,7 +123,7 @@ def load_root_config(config_dict, only_default_plugins=False) -> CLIRootConfig:
     return cfg
 
 
-def _load_plugins(root_config: Optional[CLIRootConfig], plugins_enabled: bool):
+def _load_plugins(root_config: CLIRootConfig | None, plugins_enabled: bool):
     from importlib import metadata
 
     # we always load the default ones
@@ -151,7 +152,7 @@ def _load_plugins(root_config: Optional[CLIRootConfig], plugins_enabled: bool):
         for v in to_load
     ]
     resulting_plugins = list(SIGNING_PLUGIN_REGISTRY)
-    seen = set(type(x) for x in SIGNING_PLUGIN_REGISTRY)
+    seen = {type(x) for x in SIGNING_PLUGIN_REGISTRY}
     for ep in itertools.chain(to_load_as_endpoints, eps_from_metadata):
         plugin_cls = ep.load()
         if not isinstance(plugin_cls, type):
