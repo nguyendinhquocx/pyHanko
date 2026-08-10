@@ -10,6 +10,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import doctest
 import os
 import subprocess
 import sys
@@ -33,7 +34,7 @@ def get_version():
 # -- Project information -----------------------------------------------------
 
 project = 'pyHanko'
-copyright = '2020-2025, Matthias Valvekens'
+copyright = '2020-2026, Matthias Valvekens'
 author = 'Matthias Valvekens'
 
 # The full version, including alpha/beta/rc tags
@@ -46,7 +47,28 @@ version = release.split('-')[0]  # strip the release tag
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = ['sphinx.ext.autodoc', 'sphinx_rtd_theme']
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.doctest', 'sphinx_rtd_theme']
+
+doctest_default_flags = doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE
+
+# Imports shared by every doctest document. The heavy lifting (PKI material,
+# sample files, network mocking) is handled per-document by make_doc_env from
+# pyhanko_testing_commons.docs_testing; see docs/DOCTESTS.md.
+doctest_global_setup = """
+from certomancer.registry import ArchLabel, CertLabel, ServiceLabel
+from pyhanko_testing_commons.docs_testing import (
+    make_doc_env,
+    teardown_doc_env,
+    DocEnvSpec,
+    SignerSpec,
+    SignerProvisioning,
+    TrustSpec,
+    TrustListSpec,
+    TimestampSpec,
+    SignatureProfile,
+    SignedDocSpec,
+)
+"""
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

@@ -13,10 +13,18 @@ Reading files
 
 Opening PDF files for reading and writing in pyHanko is easy.
 
+.. testsetup:: *
+
+    globals().update(make_doc_env(DocEnvSpec(signers=())))
+
+.. testcleanup:: *
+
+    teardown_doc_env(_doc_env)
+
 For example, to instantiate a :class:`~.pyhanko.pdf_utils.reader.PdfFileReader`
 reading from ``document.pdf``, it suffices to do the following.
 
-.. code-block:: python
+.. testcode::
 
     from pyhanko.pdf_utils.reader import PdfFileReader
 
@@ -29,12 +37,13 @@ In-memory data can be read in a similar way: if ``buf`` is a :class:`bytes`
 object containing data from a PDF file, you can use it in a
 :class:`~.pyhanko.pdf_utils.reader.PdfFileReader` as follows.
 
-.. code-block:: python
+.. testcode::
 
     from pyhanko.pdf_utils.reader import PdfFileReader
     from io import BytesIO
 
-    buf = b'<PDF file data goes here>'
+    with open('document.pdf', 'rb') as f:
+        buf = f.read()  # buf holds the raw PDF bytes
     doc = BytesIO(buf)
     r = PdfFileReader(doc)
     # ... do stuff ...
@@ -47,7 +56,7 @@ If you want to modify a PDF file, use
 :class:`~.pyhanko.pdf_utils.incremental_writer.IncrementalPdfFileWriter`,
 like so.
 
-.. code-block:: python
+.. testcode::
 
     from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 
