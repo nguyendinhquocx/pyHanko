@@ -258,6 +258,8 @@ def build_cert_validation_policy_and_extract_extra_certs(
         overrides['eutl-force-redownload'] = True
     if revocation_policy:
         overrides['revocation-policy'] = revocation_policy
+    if trust_replace:
+        overrides['trust-replace'] = True
     try:
         if validation_context is not None:
             if any((trust, other_certs)):
@@ -412,7 +414,6 @@ EXPECTED_CONFIG_KEYS = (
     'signer-key-usage',
     'signer-extd-key-usage',
     'signer-key-usage-policy',
-    'eutl',
     'eutl-force-redownload',
     'eutl-lotl-url',
     'lotl-tlso-certs',
@@ -430,14 +431,15 @@ def parse_trust_config_into_policy(
         EXPECTED_CONFIG_KEYS,
         trust_config,
     )
-    territories: Any = trust_config.get('eutl-territories', None)
+    eutl = 'eutl-territories' in trust_config
+    territories: Any = trust_config.get('eutl-territories')
+    if eutl and not territories:
+        raise ConfigurationError(
+            "'eutl-territories' must be non-empty; omit the setting to "
+            "disable EU trusted list sourcing"
+        )
     if territories == 'all':
         territories = None
-        eutl = True
-    elif territories:
-        eutl = True
-    else:
-        eutl = False
     return derive_cert_validation_policy(
         cli_config=cli_config,
         trust_manager_settings=TrustManagerSettings(
