@@ -22,7 +22,7 @@ from pyhanko.sign.diff_analysis import ModificationLevel
 from pyhanko.sign.fields import SigSeedSubFilter
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.timestamps import HTTPTimeStamper
-from pyhanko.sign.timestamps.aiohttp_client import AIOHttpTimeStamper
+from pyhanko.sign.timestamps.requests_client import RequestsHTTPTimeStamper
 from pyhanko.sign.validation import (
     DocumentSecurityStore,
 )
@@ -45,6 +45,7 @@ from pyhanko_certvalidator.fetchers.aiohttp_fetchers import (
 from pyhanko_certvalidator.fetchers.requests_fetchers import (
     RequestsCertificateFetcher,
     RequestsCRLFetcher,
+    RequestsFetcherBackend,
     RequestsOCSPFetcher,
 )
 from pyhanko_certvalidator.policy_decl import (
@@ -194,7 +195,7 @@ async def test_pades_lta_live(start_with_full_chain):
                 use_pades_lta=True,
             ),
             signer=signer,
-            timestamper=AIOHttpTimeStamper(
+            timestamper=HTTPTimeStamper(
                 f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa", session=session
             ),
         )
@@ -214,7 +215,7 @@ async def test_async_sign_many_concurrent():
 
         vc, root = await _init_validation_context(session, arch)
 
-        timestamper = AIOHttpTimeStamper(
+        timestamper = HTTPTimeStamper(
             f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa", session=session
         )
 
@@ -259,7 +260,7 @@ async def test_async_lazy_session():
             session, arch, backend=AIOHttpFetcherBackend(session=None)
         )
 
-    timestamper = AIOHttpTimeStamper(
+    timestamper = HTTPTimeStamper(
         f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa", session=LazySession()
     )
 
@@ -296,7 +297,7 @@ async def test_async_strict_cert_fetchers_happy_path():
             session, arch, backend=None, fetchers=fetchers
         )
 
-        timestamper = AIOHttpTimeStamper(
+        timestamper = HTTPTimeStamper(
             f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa", session=session
         )
 
@@ -333,7 +334,42 @@ async def test_requests_fetchers_happy_path(strict):
             session, arch, backend=None, fetchers=fetchers
         )
 
-    timestamper = HTTPTimeStamper(f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa")
+    timestamper = RequestsHTTPTimeStamper(
+        f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa"
+    )
+
+    w = IncrementalPdfFileWriter(BytesIO(MINIMAL_ONE_FIELD))
+    meta = signers.PdfSignatureMetadata(
+        field_name='Sig1',
+        validation_context=vc,
+        subfilter=SigSeedSubFilter.PADES,
+        embed_validation_info=True,
+        use_pades_lta=True,
+    )
+    pdf_signer = signers.PdfSigner(meta, signer, timestamper=timestamper)
+    out = await pdf_signer.async_sign_pdf(w, in_place=True)
+    async with aiohttp.ClientSession() as session:
+        await _check_pades_result(out, [root], session)
+
+
+@run_if_live
+@pytest.mark.asyncio
+@pytest.mark.parametrize('strict', [True, False])
+async def test_requests_fetcher_backend_happy_path(strict):
+    arch = "testing-ca"
+    async with aiohttp.ClientSession() as session:
+        signer = await _retrieve_and_decode_credentials(
+            session, arch, "signer1-long", skip_other_certs=True
+        )
+        backend = RequestsFetcherBackend()
+        vc, root = await _init_validation_context(
+            session, arch, backend=backend
+        )
+        await backend.close()
+
+    timestamper = RequestsHTTPTimeStamper(
+        f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa"
+    )
 
     w = IncrementalPdfFileWriter(BytesIO(MINIMAL_ONE_FIELD))
     meta = signers.PdfSignatureMetadata(
@@ -431,7 +467,7 @@ FETCH_TIMEOUT = 30
 
 @run_if_live
 @pytest.mark.asyncio
-async def test_ts_fetch_requests():
+async def test_ts_fetch_default_session():
     arch = "testing-ca"
     url = f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa"
     ts = HTTPTimeStamper(url, timeout=FETCH_TIMEOUT)
@@ -457,7 +493,7 @@ async def test_ts_fetch_aiohttp():
     arch = "testing-ca"
     url = f"{CERTOMANCER_HOST_URL}/{arch}/tsa/tsa"
     async with aiohttp.ClientSession() as session:
-        ts = AIOHttpTimeStamper(url, session, timeout=FETCH_TIMEOUT)
+        ts = HTTPTimeStamper(url, timeout=FETCH_TIMEOUT, session=session)
         ts_result = await ts.async_timestamp(MESSAGE_DIGEST, 'sha256')
         from pyhanko.sign.validation.generic_cms import validate_tst_signed_data
 
