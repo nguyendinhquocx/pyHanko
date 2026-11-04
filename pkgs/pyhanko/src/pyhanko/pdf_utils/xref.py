@@ -138,6 +138,9 @@ def parse_xref_table(stream, strict: bool) -> Iterator[XRefEntry]:
 
     misc.read_non_whitespace(stream)
     stream.seek(-1, os.SEEK_CUR)
+    # Unlike in xref streams, subsections in a table are not required to be
+    # sorted, so we have to track object numbers to enforce non-overlap.
+    seen = set()
     while True:
         num = generic.NumberObject.read_from_stream(stream)
         misc.read_non_whitespace(stream)
@@ -146,6 +149,12 @@ def parse_xref_table(stream, strict: bool) -> Iterator[XRefEntry]:
         misc.read_non_whitespace(stream)
         stream.seek(-1, os.SEEK_CUR)
         for cnt in range(size):
+            if num in seen:
+                raise misc.PdfReadError(
+                    f"Object number {num} appears in more than one "
+                    "subsection of the same xref section"
+                )
+            seen.add(num)
             line = stream.read(20)
 
             # It's very clear in section 3.4.3 of the PDF spec
@@ -157,6 +166,10 @@ def parse_xref_table(stream, strict: bool) -> Iterator[XRefEntry]:
             while line[0] in b"\x0d\x0a":
                 stream.seek(-20 + 1, os.SEEK_CUR)
                 line = stream.read(20)
+                if len(line) != 20:
+                    raise misc.PdfReadError(
+                        "Unexpected end of file in xref table"
+                    )
 
             # On the other hand, some malformed PDF files
             # use a single character EOL without a preceding
