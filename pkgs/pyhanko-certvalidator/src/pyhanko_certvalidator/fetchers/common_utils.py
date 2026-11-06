@@ -7,6 +7,7 @@ import asyncio
 import enum
 import logging
 import os
+from asyncio import Future
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TypeVar
 
@@ -24,8 +25,10 @@ __all__ = [
     'ACCEPTABLE_PKCS7_DER_ALIASES',
     'ACCEPTABLE_STRICT_CERT_CONTENT_TYPES',
     'complete_certificate_fetch_jobs',
+    'crl_fetch_url_groups',
     'crl_job_results_as_completed',
     'enumerate_delivery_point_urls',
+    'first_successful_fetch',
     'format_ocsp_request',
     'gather_aia_issuer_urls',
     'ocsp_job_get_earliest',
@@ -302,26 +305,31 @@ async def queue_fetch_task(
     # on 'await'.
     # We use events instead of locks because we don't care about fairness,
     # and events are easier to reason about.
-    try:
-        result = results[tag]
-        logger.debug(
-            f"Result for fetch job with tag {tag!r} was available in cache."
-        )
-        return _return_or_raise(result)
-    except KeyError:
-        pass
-    try:
-        wait_event: asyncio.Event = running_jobs[tag]
+    while True:
+        try:
+            result = results[tag]
+            logger.debug(
+                f"Result for fetch job with tag {tag!r} was available in cache."
+            )
+            return _return_or_raise(result)
+        except KeyError:
+            pass
+        wait_event = running_jobs.get(tag)
+        if wait_event is None:
+            break
         logger.debug(f"Waiting for fetch job with tag {tag!r} to return...")
-        # there's a fetch job running, wait for it to finish and then
-        # return the result
         await wait_event.wait()
-        logger.debug(f"Received completion signal for job with tag {tag!r}.")
-        return _return_or_raise(results[tag])
-    except KeyError:
-        logger.debug(f"Starting new fetch job with tag {tag!r}...")
-        # no fetch job running, run the task and store the result
-        running_jobs[tag] = wait_event = asyncio.Event()
+        # If the job we waited for was cancelled (e.g. because it lost a race
+        # in another caller), it won't have stored a result, so we go around
+        # again and take over.
+        logger.debug(
+            f"Received completion signal or "
+            f"cancellation for job with tag {tag!r}."
+        )
+
+    logger.debug(f"Starting new fetch job with tag {tag!r}...")
+    running_jobs[tag] = wait_event = asyncio.Event()
+    try:
         try:
             result = await async_fun()
         except Exception as e:  # noqa: BLE001
@@ -331,10 +339,12 @@ async def queue_fetch_task(
             result = e
         results[tag] = result
         logger.debug(f"New fetch job with tag {tag!r} returned.")
-        # deregister event, notify waiters
+    finally:
+        # Waiters must always be released, also when we're cancelled, or they
+        # would hang forever.
         del running_jobs[tag]
         wait_event.set()
-        return _return_or_raise(result)
+    return _return_or_raise(result)
 
 
 def _return_or_raise(result):
@@ -367,24 +377,47 @@ async def cancel_all(pending_tasks):
         pass
 
 
-async def ocsp_job_get_earliest(jobs):
-    queue = [asyncio.create_task(coro) for coro in jobs]
-    ocsp_resp = last_e = None
-    while queue:
-        done, queue = await asyncio.wait(
-            queue, return_when=asyncio.FIRST_COMPLETED
-        )
-        for ocsp_job in done:
-            try:
-                ocsp_resp = await ocsp_job
-                break
-            except errors.OCSPFetchError as e:
-                last_e = e
-    if ocsp_resp is not None:
-        # cancel remaining fetch tasks
+async def first_successful_fetch(
+    jobs: Iterable[Awaitable[R]], kind: FetchKind
+) -> R:
+    """
+    Run fetch jobs concurrently, and return the result of the first one
+    to complete successfully. The remaining jobs are then cancelled.
+
+    :param jobs:
+        The jobs to run. These must be interchangeable.
+    :param kind:
+        The kind of fetch being performed.
+    :return:
+        The first successful result.
+    :raises:
+        The fetch error type matching ``kind`` if all jobs failed (or if
+        there were no jobs at all).
+    """
+    error_type = kind.value
+    queue: Iterable[Future[R]] = [asyncio.ensure_future(job) for job in jobs]
+    last_e = None
+    try:
+        while queue:
+            done, queue = await asyncio.wait(
+                queue, return_when=asyncio.FIRST_COMPLETED
+            )
+            successes = []
+            # consume all completed jobs, so that no exception goes unretrieved
+            for job in done:
+                try:
+                    successes.append(job.result())
+                except error_type as e:
+                    last_e = e
+            if successes:
+                return successes[0]
+    finally:
         await cancel_all(queue)
-        return ocsp_resp
-    raise last_e or errors.OCSPFetchError("No OCSP results")
+    raise last_e or error_type(f"No {kind.name} results")
+
+
+async def ocsp_job_get_earliest(jobs):
+    return await first_successful_fetch(jobs, FetchKind.OCSP)
 
 
 def gather_aia_issuer_urls(
@@ -421,6 +454,8 @@ async def complete_certificate_fetch_jobs(fetch_jobs):
 
 def enumerate_delivery_point_urls(distribution_point: DistributionPoint):
     name = distribution_point['distribution_point']
+    if isinstance(name, core.Void):
+        return
     if name.name != 'full_name':
         logger.debug(
             f"Relative delivery point name {name.chosen.native!r} is not supported"
@@ -437,3 +472,63 @@ def enumerate_delivery_point_urls(distribution_point: DistributionPoint):
             # In particular, don't attempt to grab CRLs over LDAP
             if url.lower().startswith(('http://', 'https://')):
                 yield url
+
+
+def _has_global_scope(distribution_point: DistributionPoint) -> bool:
+    # RFC 5280 requires the CRL behind a DP that omits both the reasons and
+    # the cRLIssuer field to be issued by the certificate's issuer, and to
+    # cover all revocation reasons. So all such DPs are interchangeable.
+    return isinstance(distribution_point['reasons'], core.Void) and isinstance(
+        distribution_point['crl_issuer'], core.Void
+    )
+
+
+def _group_distribution_point_urls(
+    distribution_points: x509.CRLDistributionPoints | None,
+) -> list[list[str]]:
+    global_urls: list[str] = []
+    groups = []
+    for distribution_point in distribution_points or ():
+        urls = list(enumerate_delivery_point_urls(distribution_point))
+        if not urls:
+            continue
+        if _has_global_scope(distribution_point):
+            global_urls.extend(url for url in urls if url not in global_urls)
+        else:
+            groups.append(urls)
+    if global_urls:
+        groups.insert(0, global_urls)
+    return groups
+
+
+def crl_fetch_url_groups(
+    cert: x509.Certificate | cms.AttributeCertificateV2, *, use_deltas: bool
+) -> list[list[str]]:
+    """
+    Group the HTTP(S) URLs from which CRLs for a certificate can be fetched
+    into sets of alternatives.
+
+    URLs listed under the same distribution point are always alternatives.
+    URLs from different distribution points are only considered alternatives
+    if neither distribution point is limited to a subset of revocation
+    reasons or delegates to a different CRL issuer.
+    Complete CRLs and delta CRLs are never mixed in the same group.
+
+    :param cert:
+        The certificate (or attribute certificate) of interest.
+    :param use_deltas:
+        Whether to include delta CRL distribution points.
+    :return:
+        A list of groups of URLs. Fetching one CRL from each group should
+        be sufficient.
+    """
+    if isinstance(cert, x509.Certificate):
+        complete_dps = cert.crl_distribution_points_value
+        delta_dps = cert.freshest_crl_value
+    else:
+        complete_dps = get_ac_extension_value(cert, 'crl_distribution_points')
+        delta_dps = get_ac_extension_value(cert, 'freshest_crl')
+    groups = _group_distribution_point_urls(complete_dps)
+    if use_deltas:
+        groups.extend(_group_distribution_point_urls(delta_dps))
+    return groups

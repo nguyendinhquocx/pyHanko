@@ -3,10 +3,12 @@ from datetime import UTC, datetime
 from io import BytesIO
 from itertools import product
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from freezegun.api import freeze_time
 from pyhanko.pdf_utils import generic, misc
+from pyhanko.pdf_utils import reader as reader_module
 from pyhanko.pdf_utils.content import RawContent
 from pyhanko.pdf_utils.generic import Reference, TrailerReference, pdf_name
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
@@ -50,6 +52,7 @@ from pyhanko_testing_commons.test_data.samples import (
     MINIMAL_TWO_PAGES,
     MINIMAL_XREF,
     PDF_DATA_DIR,
+    SHARED_NESTED_RESOURCES,
     SIMPLE_FORM,
     TEST_DIR,
     TEXTFIELD_GROUP,
@@ -135,6 +138,84 @@ def test_cross_linked_pages_do_not_blow_up_paths():
     status = val_trusted(r.embedded_signatures[0], extd=True)
     assert status.modification_level == ModificationLevel.LTA_UPDATES
     assert status.docmdp_ok
+
+
+def test_tree_index_is_built_once_per_resolver():
+    r = PdfFileReader(BytesIO(MINIMAL_TWO_FIELDS_TAGGED))
+    resolver = r.get_historical_resolver(r.xrefs.total_revisions - 1)
+    refs = [Reference(i, 0, r) for i in range(1, 8)]
+    with mock.patch.object(
+        reader_module, '_TreeIndex', wraps=reader_module._TreeIndex
+    ) as tree_index_factory:
+        for ref in refs:
+            resolver._get_usages_of_ref(ref)
+        resolver._load_reverse_xref_cache()
+    assert tree_index_factory.call_count == 1
+    index = resolver._load_tree_index()
+    assert index.page_tree_nodes
+    assert index.struct_tree_nodes
+
+
+@freeze_time('2020-11-01')
+def test_shared_resources_do_not_blow_up_paths():
+    out = BytesIO(SHARED_NESTED_RESOURCES)
+    for field_name in ('Sig1', 'Sig2'):
+        out = signers.sign_pdf(
+            IncrementalPdfFileWriter(out),
+            signers.PdfSignatureMetadata(field_name=field_name),
+            signer=FROM_CA,
+        )
+
+    r = PdfFileReader(out)
+    sig = r.embedded_signatures[0]
+    status = val_trusted(sig, extd=True)
+    assert status.modification_level == ModificationLevel.FORM_FILLING
+
+    # The difference analysis only needs the usages of the objects that the
+    # second signature overrides. None of them lies behind the shared
+    # resources, so the hundreds of thousands of paths into the form XObjects
+    # are never enumerated.
+    resolver = r.get_historical_resolver(sig.signed_revision)
+    cache = resolver._indirect_object_access_cache
+    assert cache is not None
+    assert sum(len(paths) for paths in cache.values()) < 1000
+
+
+@pytest.mark.parametrize(
+    'pdf_bytes',
+    [
+        MINIMAL_TWO_FIELDS_TAGGED,
+        MINIMAL_ONE_FIELD_TAGGED,
+        SIMPLE_FORM,
+        TEXTFIELD_GROUP,
+        _cross_linked_pages(4),
+        SHARED_NESTED_RESOURCES,
+    ],
+)
+def test_targeted_usage_paths_match_full_mapping(pdf_bytes):
+    def _resolver():
+        r = PdfFileReader(BytesIO(pdf_bytes))
+        return r.get_historical_resolver(r.xrefs.total_revisions - 1)
+
+    full = _resolver()
+    full._load_reverse_xref_cache()
+    full._load_reverse_xref_cache()  # no-op once complete
+    expected = full._indirect_object_access_cache
+    assert expected
+
+    # one ref at a time, on a fresh resolver
+    for ref, paths in expected.items():
+        assert _resolver()._get_usages_of_ref(ref) == paths
+
+    # all refs on one resolver, so later lookups reuse earlier results
+    shared = _resolver()
+    for ref, paths in expected.items():
+        shared._load_reverse_xref_cache(targets=(ref,))
+        assert shared._get_usages_of_ref(ref) == paths
+
+    # a full mapping after targeted ones still covers everything
+    shared._load_reverse_xref_cache()
+    assert shared._indirect_object_access_cache == expected
 
 
 def _build_and_map_paths(n_pages: int, tweak):
@@ -2383,7 +2464,7 @@ def test_diff_analysis_circular_page_tree():
         validate_pdf_signature(s, simple_v_context())
 
     # manually call _walk_page_tree_annots to test the defence-in-depth function
-    old = r.get_historical_resolver(1)
+    old = r.get_historical_resolver(r.total_revisions - 2)
     new = r.get_historical_resolver(2)
     from pyhanko.sign.diff_analysis.rules.form_field_rules import (
         _walk_page_tree_annots,
@@ -3163,3 +3244,68 @@ def test_recycled_phantom_sig_add_visible_field_approval():
     assert not status.docmdp_ok
 
     assert 'references an existing object' in str(status.diff_result)
+
+
+def test_relative_view_uses_historical_revision():
+    testfile = PDF_DATA_DIR + '/pades-lta-dss-indirect-arrs-test.pdf'
+    with open(testfile, 'rb') as f:
+        r = PdfFileReader(f)
+        old = r.get_historical_resolver(3)
+        context = Context.from_absolute(
+            old, RawPdfPath('/Root', '/DSS', '/CRLs', 0)
+        )
+        assert context.relative_view.anchor == Reference(23, 0, old)
+
+
+def _dss_revisions_with_replaced_certs():
+    w = IncrementalPdfFileWriter(BytesIO(MINIMAL_ONE_FIELD))
+    first_certs = w.add_object(generic.ArrayObject([generic.NullObject()]))
+    w.root['/DSS'] = w.add_object(
+        generic.DictionaryObject({'/Certs': first_certs})
+    )
+    w.trailer['/Extra'] = generic.DictionaryObject(
+        {'/Nested': generic.ArrayObject([first_certs])}
+    )
+    w.update_root()
+    out = BytesIO()
+    w.write(out)
+
+    w = IncrementalPdfFileWriter(out)
+    second_certs = w.add_object(generic.ArrayObject([generic.NullObject()]))
+    w.root['/DSS'] = w.add_object(
+        generic.DictionaryObject({'/Certs': second_certs})
+    )
+    w.update_root()
+    w.trailer['/Extra'] = generic.DictionaryObject(
+        {'/Nested': generic.ArrayObject([second_certs])}
+    )
+    out2 = BytesIO()
+    w.write(out2)
+    return out2, first_certs.reference, second_certs.reference
+
+
+def test_relative_view_historical_revision_after_container_replaced():
+    out, first_certs, second_certs = _dss_revisions_with_replaced_certs()
+    r = PdfFileReader(out)
+    old = r.get_historical_resolver(r.total_revisions - 2)
+    context = Context.from_absolute(
+        old, RawPdfPath('/Root', '/DSS', '/Certs', 0)
+    )
+    assert context.relative_view.anchor == first_certs
+    assert context.relative_view.anchor.get_pdf_handler() is old
+    assert first_certs != second_certs
+
+
+def test_historical_trailer_entries_resolve_in_historical_revision():
+    out, first_certs, second_certs = _dss_revisions_with_replaced_certs()
+    r = PdfFileReader(out)
+    old = r.get_historical_resolver(r.total_revisions - 2)
+    trailer = old.trailer_view
+    assert trailer.raw_get('/Root').get_pdf_handler() is old
+    assert trailer['/Root'] is old(old.root_ref)
+    nested = trailer.raw_get('/Extra')['/Nested'].raw_get(0)
+    assert nested.get_pdf_handler() is old
+    assert nested.get_object() is old(first_certs)
+    # the latest revision is unaffected
+    latest = r.trailer_view.raw_get('/Extra')['/Nested'].raw_get(0)
+    assert latest.get_object() is r.get_object(second_certs)
